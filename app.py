@@ -134,128 +134,41 @@ async def download_m3u8_video_with_progress(url: str, download_dir: str, downloa
                                 estimated_total = bytes_downloaded * 20  # Rough estimate
                                 progress = min((bytes_downloaded / estimated_total) * 100, 95)  # Cap at 95% until complete
                                 download_progress[download_id]["progress_percent"] = int(progress)
-                                
-                                # Estimate segments (rough calculation)
-                                estimated_segments = max(int(progress * 10), 1)  # Rough segment estimation
-                                download_progress[download_id]["segments_downloaded"] = estimated_segments
-                                download_progress[download_id]["total_segments"] = 1000  # Placeholder
-                                
-                                # Calculate ETA
-                                if speed_bps > 0 and progress < 95:
-                                    remaining_bytes = estimated_total - bytes_downloaded
-                                    eta_seconds = remaining_bytes / speed_bps
-                                    eta_minutes = int(eta_seconds // 60)
-                                    eta_secs = int(eta_seconds % 60)
-                                    download_progress[download_id]["eta"] = f"{eta_minutes}:{eta_secs:02d}"
         
-        # Start monitoring progress
+        # Start progress monitoring
         progress_task = asyncio.create_task(monitor_progress())
-        
-        # Wait for process to complete
         stdout, stderr = await process.communicate()
-        
-        # Cancel progress monitoring
         progress_task.cancel()
         
         if process.returncode == 0 and os.path.exists(output_file):
-            file_size = os.path.getsize(output_file)
-            
-            # Update final progress
-            download_progress[download_id].update({
-                "status": "completed",
-                "progress_percent": 100,
-                "current_segment": "Download completed!",
-                "eta": "0:00",
-                "bytes_downloaded": file_size,
-                "total_bytes": file_size
-            })
-            
-            return {
-                "status": "success", 
-                "message": "Download completed",
-                "file_path": output_file,
-                "file_size": file_size
-            }
+            download_progress[download_id]["status"] = "completed"
+            return {"status": "success", "file_path": output_file, "file_size": os.path.getsize(output_file)}
         else:
-            error_msg = stderr.decode() if stderr else "Unknown error"
             download_progress[download_id]["status"] = "error"
-            download_progress[download_id]["error"] = error_msg
-            return {"status": "error", "message": f"Download failed: {error_msg}"}
+            return {"status": "error", "message": stderr.decode() if stderr else "Download failed"}
             
     except Exception as e:
         download_progress[download_id]["status"] = "error"
-        download_progress[download_id]["error"] = str(e)
-        return {"status": "error", "message": f"Exception occurred: {str(e)}"}
-
-async def download_m3u8_video(url: str, download_dir: str):
-    """Download M3U8 video using ffmpeg (legacy function for compatibility)"""
-    download_id = str(uuid.uuid4())
-    return await download_m3u8_video_with_progress(url, download_dir, download_id)
-
-@app.get("/download")
-@app.post("/download")
-async def download_video(url: str = Query(..., description="M3U8 URL to download")):
-    """Download M3U8 video from provided URL"""
-    if not url:
-        raise HTTPException(status_code=400, detail="URL parameter is required")
-    
-    if not url.startswith(('http://', 'https://')):
-        raise HTTPException(status_code=400, detail="Invalid URL format")
-    
-    # Generate unique directory for this download
-    download_id = str(uuid.uuid4())
-    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
-    os.makedirs(download_dir, exist_ok=True)
-    
-    try:
-        # Download the video
-        result = await download_m3u8_video(url, download_dir)
-        
-        if result["status"] == "success":
-            return {
-                "download_id": download_id,
-                "status": "completed",
-                "message": "Video downloaded successfully",
-                "download_path": download_dir,
-                "file_info": {
-                    "file_path": result["file_path"],
-                    "file_size": result["file_size"]
-                }
-            }
-        else:
-            # Clean up failed download directory
-            shutil.rmtree(download_dir, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=result["message"])
-            
-    except Exception as e:
-        # Clean up on error
-        shutil.rmtree(download_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/stream")
 @app.post("/stream")
 async def stream_download_video(url: str = Query(..., description="M3U8 URL to download and stream directly")):
     """Download M3U8 video and stream it directly to user"""
-    if not url:
-        raise HTTPException(status_code=400, detail="URL parameter is required")
+    if not url or not url.startswith(('http://', 'https://')):
+        raise HTTPException(status_code=400, detail="Valid URL required")
     
-    if not url.startswith(('http://', 'https://')):
-        raise HTTPException(status_code=400, detail="Invalid URL format")
-    
-    # Generate unique directory for this download
     download_id = str(uuid.uuid4())
     download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
     os.makedirs(download_dir, exist_ok=True)
     
     try:
-        # Download the video
-        result = await download_m3u8_video(url, download_dir)
+        result = await download_m3u8_video_with_progress(url, download_dir, download_id)
         
         if result["status"] == "success":
             file_path = result["file_path"]
             filename = os.path.basename(file_path)
             
-            # Stream the file directly to user
             return FileResponse(
                 file_path,
                 media_type='video/mp4',
@@ -263,14 +176,30 @@ async def stream_download_video(url: str = Query(..., description="M3U8 URL to d
                 headers={"Content-Disposition": f"attachment; filename={filename}"}
             )
         else:
-            # Clean up failed download directory
             shutil.rmtree(download_dir, ignore_errors=True)
             raise HTTPException(status_code=500, detail=result["message"])
             
     except Exception as e:
-        # Clean up on error
         shutil.rmtree(download_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
+@app.post("/cancel/{download_id}")
+async def cancel_download(download_id: str):
+    """Cancel an ongoing download"""
+    if download_id not in download_progress:
+        raise HTTPException(status_code=404, detail="Download ID not found")
+    
+    if download_progress[download_id]["status"] != "downloading":
+        raise HTTPException(status_code=400, detail="Download cannot be cancelled")
+    
+    download_progress[download_id]["status"] = "cancelled"
+    
+    # Clean up
+    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
+    if os.path.exists(download_dir):
+        shutil.rmtree(download_dir, ignore_errors=True)
+    
+    return {"download_id": download_id, "status": "cancelled", "message": "Download cancelled"}
 
 @app.get("/progress/{download_id}")
 async def get_download_progress(download_id: str):
@@ -280,7 +209,6 @@ async def get_download_progress(download_id: str):
     
     progress_data = download_progress[download_id].copy()
     
-    # Format the response exactly like your web UI needs
     return {
         "download_id": download_id,
         "status": progress_data["status"],
