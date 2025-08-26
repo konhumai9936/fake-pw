@@ -1,72 +1,46 @@
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 import os
 import uuid
 import subprocess
 import asyncio
 from datetime import datetime
 import shutil
-from pathlib import Path
 import uvicorn
+import re
+import time
 
-app = FastAPI(title="M3U8 Video Downloader Proxy", version="1.0.0")
+app = FastAPI(title="M3U8 Video Downloader", version="1.0.0")
 
 # Base download directory
 DOWNLOAD_BASE_DIR = "downloads"
-
-# Ensure downloads directory exists
 os.makedirs(DOWNLOAD_BASE_DIR, exist_ok=True)
+
+# Global progress tracking (minimal - only ETA and speed)
+download_progress = {}
 
 @app.get("/")
 async def root():
-    # Check if ffmpeg is available
-    ffmpeg_available = False
-    try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
-        ffmpeg_available = result.returncode == 0
-    except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    
     return {
-        "message": "M3U8 Video Downloader Proxy", 
+        "message": "M3U8 Video Downloader", 
         "status": "running",
-        "ffmpeg_available": ffmpeg_available,
-        "usage": "GET /stream?url=<m3u8_url> to download videos directly"
+        "endpoints": {
+            "stream": "GET/POST /stream?url=<m3u8_url> - Download and stream video directly",
+            "cancel": "POST /cancel/<download_id> - Cancel ongoing download"
+        }
     }
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
 async def download_m3u8_video_with_progress(url: str, download_dir: str, download_id: str):
-    """Download M3U8 video using ffmpeg with detailed progress tracking"""
+    """Download M3U8 video with minimal progress tracking (ETA + Speed only)"""
     try:
-        # Initialize progress tracking
+        # Initialize minimal progress
         download_progress[download_id] = {
-            "status": "initializing",
-            "progress_percent": 0,
-            "segments_downloaded": 0,
-            "total_segments": 0,
-            "download_speed": "0 MB/s",
+            "status": "downloading",
+            "speed": "0 MB/s",
             "eta": "calculating...",
-            "current_segment": "",
             "start_time": time.time(),
-            "bytes_downloaded": 0,
-            "total_bytes": 0,
-            "error": None
+            "bytes_downloaded": 0
         }
-        
-        # Check if ffmpeg is available
-        try:
-            ffmpeg_check = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await ffmpeg_check.communicate()
-            if ffmpeg_check.returncode != 0:
-                download_progress[download_id]["status"] = "error"
-                download_progress[download_id]["error"] = "FFmpeg is not available in the system"
         
         # Generate output filename
         output_file = os.path.join(download_dir, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
@@ -164,171 +138,17 @@ async def cancel_download(download_id: str):
     if download_id not in download_progress:
         raise HTTPException(status_code=404, detail="Download ID not found")
     
-    if download_progress[download_id]["status"] not in ["downloading", "initializing"]:
-        raise HTTPException(status_code=400, detail="Download cannot be cancelled in current state")
+    if download_progress[download_id]["status"] != "downloading":
+        raise HTTPException(status_code=400, detail="Download cannot be cancelled")
     
-    # Update status to cancelled
     download_progress[download_id]["status"] = "cancelled"
     
-    # Clean up download directory
+    # Clean up
     download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
     if os.path.exists(download_dir):
         shutil.rmtree(download_dir, ignore_errors=True)
     
-    return {
-        "download_id": download_id,
-        "status": "cancelled",
-        "message": "Download cancelled successfully"
-    }
-
-@app.get("/progress/{download_id}")
-async def get_download_progress(download_id: str):
-    """Get real-time download progress - Perfect for web UI!"""
-    if download_id not in download_progress:
-        raise HTTPException(status_code=404, detail="Download ID not found or not started")
-    
-    progress_data = download_progress[download_id].copy()
-    
-    return {
-        "download_id": download_id,
-        "status": progress_data["status"],
-        "progress": {
-            "percent": progress_data["progress_percent"],
-            "segments": {
-                "downloaded": progress_data["segments_downloaded"],
-                "total": progress_data["total_segments"],
-                "display": f"{progress_data['segments_downloaded']}/{progress_data['total_segments']}"
-            },
-            "speed": progress_data["download_speed"],
-            "eta": progress_data["eta"],
-            "current_segment": progress_data["current_segment"],
-            "bytes": {
-                "downloaded": progress_data["bytes_downloaded"],
-                "total": progress_data["total_bytes"],
-                "downloaded_mb": round(progress_data["bytes_downloaded"] / (1024 * 1024), 2),
-                "total_mb": round(progress_data["total_bytes"] / (1024 * 1024), 2)
-            }
-        },
-        "error": progress_data.get("error"),
-        "can_cancel": progress_data["status"] in ["downloading", "initializing"]
-    }
-
-@app.post("/cancel/{download_id}")
-async def cancel_download(download_id: str):
-    """Cancel an ongoing download"""
-    if download_id not in download_progress:
-        raise HTTPException(status_code=404, detail="Download ID not found")
-    
-    if download_progress[download_id]["status"] not in ["downloading", "initializing"]:
-        raise HTTPException(status_code=400, detail="Download cannot be cancelled in current state")
-    
-    # Update status to cancelled
-    download_progress[download_id]["status"] = "cancelled"
-    download_progress[download_id]["current_segment"] = "Download cancelled by user"
-    
-    # Clean up download directory
-    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
-    if os.path.exists(download_dir):
-        shutil.rmtree(download_dir, ignore_errors=True)
-    
-    return {
-        "download_id": download_id,
-        "status": "cancelled",
-        "message": "Download cancelled successfully"
-    }
-
-@app.get("/download/{download_id}/status")
-async def get_download_status(download_id: str):
-    """Check status of a download (legacy endpoint)"""
-    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
-    
-    if not os.path.exists(download_dir):
-        raise HTTPException(status_code=404, detail="Download ID not found")
-    
-    # List files in download directory
-    files = []
-    for file in os.listdir(download_dir):
-        file_path = os.path.join(download_dir, file)
-        if os.path.isfile(file_path):
-            files.append({
-                "filename": file,
-                "size": os.path.getsize(file_path),
-                "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
-            })
-    
-    return {
-        "download_id": download_id,
-        "status": "completed" if files else "processing",
-        "files": files
-    }
-
-@app.get("/download/{download_id}/file/{filename}")
-async def serve_download_file(download_id: str, filename: str):
-    """Serve a downloaded file for download"""
-    file_path = os.path.join(DOWNLOAD_BASE_DIR, download_id, filename)
-    
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(
-        file_path, 
-        media_type='video/mp4',
-        filename=filename,
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
-
-@app.get("/download/{download_id}/files")
-async def list_download_files(download_id: str):
-    """List all files in a download directory with download links"""
-    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
-    
-    if not os.path.exists(download_dir):
-        raise HTTPException(status_code=404, detail="Download ID not found")
-    
-    files = []
-    for file in os.listdir(download_dir):
-        file_path = os.path.join(download_dir, file)
-        if os.path.isfile(file_path):
-            files.append({
-                "filename": file,
-                "size": os.path.getsize(file_path),
-                "size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
-                "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat(),
-                "download_url": f"/download/{download_id}/file/{file}"
-            })
-    
-    return {
-        "download_id": download_id,
-        "files": files,
-        "total_files": len(files)
-    }
-
-@app.get("/downloads")
-async def list_downloads():
-    """List all download directories"""
-    if not os.path.exists(DOWNLOAD_BASE_DIR):
-        return {"downloads": []}
-    
-    downloads = []
-    for item in os.listdir(DOWNLOAD_BASE_DIR):
-        item_path = os.path.join(DOWNLOAD_BASE_DIR, item)
-        if os.path.isdir(item_path):
-            # Get files in directory
-            files = [f for f in os.listdir(item_path) if os.path.isfile(os.path.join(item_path, f))]
-            file_count = len(files)
-            
-            # Get total size
-            total_size = sum(os.path.getsize(os.path.join(item_path, f)) for f in files)
-            
-            downloads.append({
-                "download_id": item,
-                "created": datetime.fromtimestamp(os.path.getctime(item_path)).isoformat(),
-                "file_count": file_count,
-                "total_size_mb": round(total_size / (1024 * 1024), 2),
-                "files_url": f"/download/{item}/files"
-            })
-    
-    return {"downloads": downloads}
+    return {"download_id": download_id, "status": "cancelled", "message": "Download cancelled"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
