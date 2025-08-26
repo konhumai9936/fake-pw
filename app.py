@@ -19,9 +19,18 @@ os.makedirs(DOWNLOAD_BASE_DIR, exist_ok=True)
 
 @app.get("/")
 async def root():
+    # Check if ffmpeg is available
+    ffmpeg_available = False
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
+        ffmpeg_available = result.returncode == 0
+    except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
     return {
         "message": "M3U8 Video Downloader Proxy", 
         "status": "running",
+        "ffmpeg_available": ffmpeg_available,
         "usage": "POST /download?url=<m3u8_url> to download videos"
     }
 
@@ -32,6 +41,19 @@ async def health_check():
 async def download_m3u8_video(url: str, download_dir: str):
     """Download M3U8 video using ffmpeg"""
     try:
+        # Check if ffmpeg is available
+        try:
+            ffmpeg_check = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await ffmpeg_check.communicate()
+            if ffmpeg_check.returncode != 0:
+                return {"status": "error", "message": "FFmpeg is not available in the system"}
+        except FileNotFoundError:
+            return {"status": "error", "message": "FFmpeg is not installed"}
+        
         # Generate output filename
         output_file = os.path.join(download_dir, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         
@@ -42,6 +64,7 @@ async def download_m3u8_video(url: str, download_dir: str):
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
             "-y",  # Overwrite output file
+            "-timeout", "30000000",  # 30 second timeout
             output_file
         ]
         

@@ -18,6 +18,9 @@ COPY . .
 # Create downloads directory
 RUN mkdir -p downloads
 
+# Verify ffmpeg installation
+RUN ffmpeg -version
+
 # Expose port
 EXPOSE 8000
 
