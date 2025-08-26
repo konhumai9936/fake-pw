@@ -156,6 +156,47 @@ async def get_download_status(download_id: str):
         "files": files
     }
 
+@app.get("/download/{download_id}/file/{filename}")
+async def serve_download_file(download_id: str, filename: str):
+    """Serve a downloaded file for download"""
+    file_path = os.path.join(DOWNLOAD_BASE_DIR, download_id, filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        file_path, 
+        media_type='video/mp4',
+        filename=filename,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@app.get("/download/{download_id}/files")
+async def list_download_files(download_id: str):
+    """List all files in a download directory with download links"""
+    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
+    
+    if not os.path.exists(download_dir):
+        raise HTTPException(status_code=404, detail="Download ID not found")
+    
+    files = []
+    for file in os.listdir(download_dir):
+        file_path = os.path.join(download_dir, file)
+        if os.path.isfile(file_path):
+            files.append({
+                "filename": file,
+                "size": os.path.getsize(file_path),
+                "size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
+                "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat(),
+                "download_url": f"/download/{download_id}/file/{file}"
+            })
+    
+    return {
+        "download_id": download_id,
+        "files": files,
+        "total_files": len(files)
+    }
+
 @app.get("/downloads")
 async def list_downloads():
     """List all download directories"""
@@ -166,12 +207,19 @@ async def list_downloads():
     for item in os.listdir(DOWNLOAD_BASE_DIR):
         item_path = os.path.join(DOWNLOAD_BASE_DIR, item)
         if os.path.isdir(item_path):
-            # Count files in directory
-            file_count = len([f for f in os.listdir(item_path) if os.path.isfile(os.path.join(item_path, f))])
+            # Get files in directory
+            files = [f for f in os.listdir(item_path) if os.path.isfile(os.path.join(item_path, f))]
+            file_count = len(files)
+            
+            # Get total size
+            total_size = sum(os.path.getsize(os.path.join(item_path, f)) for f in files)
+            
             downloads.append({
                 "download_id": item,
                 "created": datetime.fromtimestamp(os.path.getctime(item_path)).isoformat(),
-                "file_count": file_count
+                "file_count": file_count,
+                "total_size_mb": round(total_size / (1024 * 1024), 2),
+                "files_url": f"/download/{item}/files"
             })
     
     return {"downloads": downloads}
