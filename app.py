@@ -54,86 +54,28 @@ async def health_check():
         "service": "M3U8 Video Downloader"
     }
 
-async def download_m3u8_video_with_progress(url: str, download_dir: str, download_id: str):
-    """Download M3U8 video with minimal progress tracking (ETA + Speed only)"""
+async def download_m3u8_video_fast(url: str, download_dir: str, download_id: str):
+    """Download M3U8 video - FAST with no progress monitoring"""
     try:
-        # Initialize minimal progress
-        download_progress[download_id] = {
-            "status": "downloading",
-            "speed": "0 MB/s",
-            "eta": "calculating...",
-            "start_time": time.time(),
-            "bytes_downloaded": 0
-        }
+        # Simple status tracking only
+        download_progress[download_id] = {"status": "downloading"}
         
         # Generate output filename
         output_file = os.path.join(download_dir, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         
-        # FFmpeg command with progress output
+        # FFmpeg command - optimized for speed (no progress output)
         cmd = [
             "ffmpeg", "-i", url, "-c", "copy", "-bsf:a", "aac_adtstoasc", 
-            "-y", "-timeout", "30000000", "-progress", "pipe:1", output_file
+            "-y", "-timeout", "30000000", output_file
         ]
         
+        # Run FFmpeg directly without progress monitoring
         process = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         
-        # Monitor progress by reading stdout line by line
-        stdout_lines = []
-        stderr_lines = []
-        
-        async def read_stdout():
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                line_str = line.decode().strip()
-                stdout_lines.append(line_str)
-                
-                # Parse progress info (minimal - only speed and ETA)
-                if "size=" in line_str:
-                    size_match = re.search(r'size=\s*(\d+)', line_str)
-                    if size_match:
-                        bytes_downloaded = int(size_match.group(1)) * 1024
-                        download_progress[download_id]["bytes_downloaded"] = bytes_downloaded
-                        
-                        # Calculate speed and ETA
-                        elapsed = time.time() - download_progress[download_id]["start_time"]
-                        if elapsed > 0:
-                            speed_mbps = (bytes_downloaded / elapsed) / (1024 * 1024)
-                            download_progress[download_id]["speed"] = f"{speed_mbps:.2f} MB/s"
-                            
-                            # Simple ETA estimation
-                            if bytes_downloaded > 1024 * 1024:  # After 1MB downloaded
-                                estimated_total = bytes_downloaded * 15  # Rough estimate
-                                remaining = estimated_total - bytes_downloaded
-                                eta_seconds = remaining / (bytes_downloaded / elapsed)
-                                eta_minutes = int(eta_seconds // 60)
-                                eta_secs = int(eta_seconds % 60)
-                                download_progress[download_id]["eta"] = f"{eta_minutes}:{eta_secs:02d}"
-        
-        async def read_stderr():
-            while True:
-                line = await process.stderr.readline()
-                if not line:
-                    break
-                stderr_lines.append(line.decode().strip())
-        
-        # Start reading tasks
-        stdout_task = asyncio.create_task(read_stdout())
-        stderr_task = asyncio.create_task(read_stderr())
-        
-        # Wait for process to complete
-        await process.wait()
-        
-        # Cancel reading tasks
-        stdout_task.cancel()
-        stderr_task.cancel()
-        
-        # Get final output
-        stdout = "\n".join(stdout_lines)
-        stderr = "\n".join(stderr_lines)
+        # Wait for completion - no monitoring overhead
+        stdout, stderr = await process.communicate()
         
         if process.returncode == 0 and os.path.exists(output_file):
             download_progress[download_id]["status"] = "completed"
@@ -177,7 +119,7 @@ async def stream_download_video(url: str = Query(None, description="M3U8 URL to 
         download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
         os.makedirs(download_dir, exist_ok=True)
         
-        result = await download_m3u8_video_with_progress(url, download_dir, download_id)
+        result = await download_m3u8_video_fast(url, download_dir, download_id)
         
         if result["status"] == "success":
             file_path = result["file_path"]
