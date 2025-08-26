@@ -67,38 +67,21 @@ async def download_m3u8_video_with_progress(url: str, download_dir: str, downloa
             if ffmpeg_check.returncode != 0:
                 download_progress[download_id]["status"] = "error"
                 download_progress[download_id]["error"] = "FFmpeg is not available in the system"
-                return {"status": "error", "message": "FFmpeg is not available in the system"}
-        except FileNotFoundError:
-            download_progress[download_id]["status"] = "error"
-            download_progress[download_id]["error"] = "FFmpeg is not installed"
-            return {"status": "error", "message": "FFmpeg is not installed"}
         
         # Generate output filename
         output_file = os.path.join(download_dir, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         
-        # Update progress
-        download_progress[download_id]["status"] = "downloading"
-        download_progress[download_id]["current_segment"] = "Starting download..."
-        
-        # Use ffmpeg to download M3U8 stream with progress
+        # FFmpeg command with progress output
         cmd = [
-            "ffmpeg",
-            "-i", url,
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            "-y",  # Overwrite output file
-            "-timeout", "30000000",  # 30 second timeout
-            "-progress", "pipe:1",  # Output progress to stdout
-            output_file
+            "ffmpeg", "-i", url, "-c", "copy", "-bsf:a", "aac_adtstoasc", 
+            "-y", "-timeout", "30000000", "-progress", "pipe:1", output_file
         ]
         
         process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         
-        # Monitor progress in real-time
+        # Monitor progress (minimal - only speed and ETA)
         async def monitor_progress():
             while True:
                 line = await process.stdout.readline()
@@ -106,34 +89,26 @@ async def download_m3u8_video_with_progress(url: str, download_dir: str, downloa
                     break
                 line = line.decode().strip()
                 
-                # Parse FFmpeg progress output
-                if "time=" in line:
-                    # Extract time information
-                    time_match = re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
-                    if time_match:
-                        current_time = time_match.group(1)
-                        download_progress[download_id]["current_segment"] = f"Processing: {current_time}"
-                
                 if "size=" in line:
-                    # Extract size information
                     size_match = re.search(r'size=\s*(\d+)', line)
                     if size_match:
-                        bytes_downloaded = int(size_match.group(1)) * 1024  # Convert KB to bytes
+                        bytes_downloaded = int(size_match.group(1)) * 1024
                         download_progress[download_id]["bytes_downloaded"] = bytes_downloaded
                         
                         # Calculate speed and ETA
-                        elapsed_time = time.time() - download_progress[download_id]["start_time"]
-                        if elapsed_time > 0:
-                            speed_bps = bytes_downloaded / elapsed_time
-                            speed_mbps = speed_bps / (1024 * 1024)
-                            download_progress[download_id]["download_speed"] = f"{speed_mbps:.2f} MB/s"
+                        elapsed = time.time() - download_progress[download_id]["start_time"]
+                        if elapsed > 0:
+                            speed_mbps = (bytes_downloaded / elapsed) / (1024 * 1024)
+                            download_progress[download_id]["speed"] = f"{speed_mbps:.2f} MB/s"
                             
-                            # Estimate progress (rough estimation)
-                            if bytes_downloaded > 0:
-                                # This is a rough estimation - in real implementation you'd parse M3U8 to get actual segment count
-                                estimated_total = bytes_downloaded * 20  # Rough estimate
-                                progress = min((bytes_downloaded / estimated_total) * 100, 95)  # Cap at 95% until complete
-                                download_progress[download_id]["progress_percent"] = int(progress)
+                            # Simple ETA estimation
+                            if bytes_downloaded > 1024 * 1024:  # After 1MB downloaded
+                                estimated_total = bytes_downloaded * 15  # Rough estimate
+                                remaining = estimated_total - bytes_downloaded
+                                eta_seconds = remaining / (bytes_downloaded / elapsed)
+                                eta_minutes = int(eta_seconds // 60)
+                                eta_secs = int(eta_seconds % 60)
+                                download_progress[download_id]["eta"] = f"{eta_minutes}:{eta_secs:02d}"
         
         # Start progress monitoring
         progress_task = asyncio.create_task(monitor_progress())
@@ -189,17 +164,22 @@ async def cancel_download(download_id: str):
     if download_id not in download_progress:
         raise HTTPException(status_code=404, detail="Download ID not found")
     
-    if download_progress[download_id]["status"] != "downloading":
-        raise HTTPException(status_code=400, detail="Download cannot be cancelled")
+    if download_progress[download_id]["status"] not in ["downloading", "initializing"]:
+        raise HTTPException(status_code=400, detail="Download cannot be cancelled in current state")
     
+    # Update status to cancelled
     download_progress[download_id]["status"] = "cancelled"
     
-    # Clean up
+    # Clean up download directory
     download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
     if os.path.exists(download_dir):
         shutil.rmtree(download_dir, ignore_errors=True)
     
-    return {"download_id": download_id, "status": "cancelled", "message": "Download cancelled"}
+    return {
+        "download_id": download_id,
+        "status": "cancelled",
+        "message": "Download cancelled successfully"
+    }
 
 @app.get("/progress/{download_id}")
 async def get_download_progress(download_id: str):
