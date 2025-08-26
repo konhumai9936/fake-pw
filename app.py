@@ -131,6 +131,46 @@ async def download_video(url: str = Query(..., description="M3U8 URL to download
         shutil.rmtree(download_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
+@app.get("/stream")
+@app.post("/stream")
+async def stream_download_video(url: str = Query(..., description="M3U8 URL to download and stream directly")):
+    """Download M3U8 video and stream it directly to user"""
+    if not url:
+        raise HTTPException(status_code=400, detail="URL parameter is required")
+    
+    if not url.startswith(('http://', 'https://')):
+        raise HTTPException(status_code=400, detail="Invalid URL format")
+    
+    # Generate unique directory for this download
+    download_id = str(uuid.uuid4())
+    download_dir = os.path.join(DOWNLOAD_BASE_DIR, download_id)
+    os.makedirs(download_dir, exist_ok=True)
+    
+    try:
+        # Download the video
+        result = await download_m3u8_video(url, download_dir)
+        
+        if result["status"] == "success":
+            file_path = result["file_path"]
+            filename = os.path.basename(file_path)
+            
+            # Stream the file directly to user
+            return FileResponse(
+                file_path,
+                media_type='video/mp4',
+                filename=filename,
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+        else:
+            # Clean up failed download directory
+            shutil.rmtree(download_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=result["message"])
+            
+    except Exception as e:
+        # Clean up on error
+        shutil.rmtree(download_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
 @app.get("/download/{download_id}/status")
 async def get_download_status(download_id: str):
     """Check status of a download"""
