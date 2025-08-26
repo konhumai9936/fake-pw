@@ -68,6 +68,7 @@ async def download_m3u8_video(url: str, download_dir: str):
     except Exception as e:
         return {"status": "error", "message": f"Exception occurred: {str(e)}"}
 
+@app.get("/download")
 @app.post("/download")
 async def download_video(url: str = Query(..., description="M3U8 URL to download")):
     """Download M3U8 video from provided URL"""
