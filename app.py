@@ -8,8 +8,6 @@ from datetime import datetime
 import shutil
 from pathlib import Path
 import uvicorn
-import re
-import time
 
 app = FastAPI(title="M3U8 Video Downloader Proxy", version="1.0.0")
 
@@ -18,9 +16,6 @@ DOWNLOAD_BASE_DIR = "downloads"
 
 # Ensure downloads directory exists
 os.makedirs(DOWNLOAD_BASE_DIR, exist_ok=True)
-
-# Global dictionary to store download progress
-download_progress = {}
 
 @app.get("/")
 async def root():
@@ -36,7 +31,7 @@ async def root():
         "message": "M3U8 Video Downloader Proxy", 
         "status": "running",
         "ffmpeg_available": ffmpeg_available,
-        "usage": "POST /download?url=<m3u8_url> to download videos"
+        "usage": "GET /stream?url=<m3u8_url> to download videos directly"
     }
 
 @app.get("/health")
